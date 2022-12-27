@@ -48,7 +48,7 @@ Both virtualenvs will be created under the `/scripts` directory.
 To actually use any of the implementations you would have to activate the environment you want. For example to use the cairo-rs-py integration you need to run:
 
 ```shell
-source activate scripts/cairo-rs-py/bin/activate
+source scripts/cairo-rs-py/bin/activate
 ```
 
 After activating the cairo-rs-py virtualenv you can try out any Cairo project and it will use cairo-rs.
@@ -73,3 +73,12 @@ In Mac you'll also need to tell the script where to find the gmp lib:
 export CFLAGS=-I/opt/homebrew/opt/gmp/include LDFLAGS=-L/opt/homebrew/opt/gmp/lib
 sh build_envs.sh
 ```
+
+## Related Projects
+
+- [cairo-rs](https://github.com/lambdaclass/cairo-rs): A fast implementation of the Cairo VM in Rust.
+- [starknet_in_rust](https://github.com/lambdaclass/starknet_in_rust): implementation of Starknet in Rust, powered by the cairo-rs VM.
+
+## License
+
+[MIT](/LICENSE)
