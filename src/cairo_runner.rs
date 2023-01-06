@@ -7,7 +7,6 @@ use crate::{
     vm_core::PyVM,
 };
 use cairo_rs::{
-    bigint,
     cairo_run::write_output,
     hint_processor::builtin_hint_processor::builtin_hint_processor_definition::BuiltinHintProcessor,
     serde::deserialize_program::Member,
@@ -26,7 +25,6 @@ use cairo_rs::{
         security::verify_secure_runner,
     },
 };
-use num_bigint::BigInt;
 use pyo3::{
     exceptions::{PyNotImplementedError, PyTypeError, PyValueError},
     prelude::*,
@@ -79,7 +77,7 @@ impl PyCairoRunner {
 
         Ok(PyCairoRunner {
             inner: cairo_runner,
-            pyvm: PyVM::new(program.prime, true, program.error_message_attributes),
+            pyvm: PyVM::new(true),
             hint_processor: BuiltinHintProcessor::new_empty(),
             hint_locals: HashMap::new(),
             struct_types: Rc::new(struct_types),
@@ -353,6 +351,7 @@ impl PyCairoRunner {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::unused_variables)]
     pub fn run_from_entrypoint(
         &mut self,
         py: Python,
@@ -384,7 +383,6 @@ impl PyCairoRunner {
         }
 
         self.static_locals = static_locals;
-        let apply_modulo_to_args = apply_modulo_to_args.unwrap_or(true);
 
         let entrypoint = if let Ok(x) = entrypoint.extract::<usize>() {
             x
@@ -402,14 +400,7 @@ impl PyCairoRunner {
             let mut stack = Vec::new();
             for arg in args.extract::<Vec<&PyAny>>(py)? {
                 let arg: MaybeRelocatable = arg.extract::<PyMaybeRelocatable>()?.into();
-                if apply_modulo_to_args {
-                    let arg = arg
-                        .mod_floor(self.pyvm.vm.borrow().get_prime())
-                        .map_err(to_py_error)?;
-                    stack.push(arg)
-                } else {
-                    stack.push(arg)
-                }
+                stack.push(arg)
             }
             stack
         } else {
@@ -428,15 +419,10 @@ impl PyCairoRunner {
             let processed_args: Vec<&dyn Any> = processed_args.iter().map(|x| x.as_any()).collect();
             let mut stack = Vec::new();
             for arg in processed_args {
-                let prime = match apply_modulo_to_args {
-                    true => Some(self.pyvm.vm.borrow().get_prime().clone()),
-                    false => None,
-                };
-
                 stack.push(
                     (*self.pyvm.vm)
                         .borrow_mut()
-                        .gen_arg(arg, prime.as_ref())
+                        .gen_arg(arg)
                         .map_err(to_py_error)?,
                 );
             }
@@ -444,7 +430,7 @@ impl PyCairoRunner {
             stack
         };
 
-        let return_fp = MaybeRelocatable::from(bigint!(0));
+        let return_fp = MaybeRelocatable::from(0);
 
         let end = self
             .inner
@@ -519,15 +505,7 @@ impl PyCairoRunner {
                     )?;
                     segment_ptr
                 }
-                _ => {
-                    let mut value: MaybeRelocatable = arg.extract::<PyMaybeRelocatable>(py)?.into();
-                    if apply_modulo_to_args {
-                        value = value
-                            .mod_floor(self.pyvm.vm.borrow().get_prime())
-                            .map_err(to_py_error)?;
-                    }
-                    value
-                }
+                _ => arg.extract::<PyMaybeRelocatable>(py)?.into(),
             })
             .to_object(py),
         )
@@ -555,7 +533,7 @@ impl PyCairoRunner {
 
         (*self.pyvm.vm)
             .borrow_mut()
-            .load_data(&ptr, data)
+            .load_data(&ptr, &data)
             .map(|x| PyMaybeRelocatable::from(x).to_object(py))
             .map_err(to_py_error)
     }
@@ -657,7 +635,7 @@ impl PyCairoRunner {
         let pc = self.pyvm.vm.borrow().get_pc().offset;
         let instruction_location = get_location(pc, &self.inner, self.pyvm.failed_hint_index)
             .map(InstructionLocation::from);
-        let error_attribute = get_error_attr_value(pc, &self.inner);
+        let error_attribute = get_error_attr_value(pc, &self.inner, &self.pyvm.vm.borrow());
         let traceback = get_traceback(&self.pyvm.vm.borrow(), &self.inner);
         VmException::new_err((
             PyRelocatable::from((0, pc)),
@@ -708,8 +686,9 @@ impl PyExecutionResources {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::bigint;
     use crate::relocatable::PyMaybeRelocatable::RelocatableValue;
-    use cairo_rs::bigint;
+    use felt::{Felt, NewFelt};
     use num_bigint::BigInt;
     use std::env::temp_dir;
     use std::fs;
@@ -744,9 +723,7 @@ mod test {
         impl MyIterator {
             #[getter]
             pub fn __annotations__(&self) -> PyResult<Annotations> {
-                Ok(Annotations {
-                    0: self.types.clone(),
-                })
+                Ok(Annotations(self.types.clone()))
             }
             pub fn __iter__(slf: PyRef<Self>) -> PyRef<Self> {
                 slf
@@ -784,7 +761,7 @@ mod test {
         #[pymethods]
         impl TypeFelt {
             fn __repr__(&self) -> String {
-                format!("TypeFelt")
+                "TypeFelt".to_string()
             }
         }
 
@@ -796,7 +773,7 @@ mod test {
         #[pymethods]
         impl TypePointer {
             fn __repr__(&self) -> String {
-                format!("TypePointer")
+                "TypePointer".to_string()
             }
         }
 
@@ -808,7 +785,7 @@ mod test {
         #[pymethods]
         impl TypeStruct {
             fn __repr__(&self) -> String {
-                format!("TypeStruct")
+                "TypeStruct".to_string()
             }
         }
     }
@@ -1442,7 +1419,7 @@ mod test {
         runner
             .initialize_function_runner()
             .expect("Failed to initialize function runner");
-        let pc_before_run = runner.pyvm.vm.borrow().get_pc().clone();
+        let pc_before_run = *runner.pyvm.vm.borrow().get_pc();
 
         Python::with_gil(|py| {
             let result = runner.run_from_entrypoint(
@@ -1460,7 +1437,7 @@ mod test {
             assert!(format!("{:?}", result).contains("Execution reached the end of the program."));
         });
 
-        let pc_after_run = runner.pyvm.vm.borrow().get_pc().clone();
+        let pc_after_run = *runner.pyvm.vm.borrow().get_pc();
 
         // As the run_resurces provide 0 steps, no steps should have been run
         // To check this, we check that the pc hasnt changed after "running" the vm
@@ -1682,7 +1659,7 @@ mod test {
                 .first()
                 .expect("there's no return value")
                 .into();
-            assert_eq!(return_value, MaybeRelocatable::Int(bigint!(15)));
+            assert_eq!(return_value, MaybeRelocatable::from(15));
         });
     }
 
@@ -1706,11 +1683,7 @@ mod test {
             (*runner.pyvm.get_vm())
                 .borrow()
                 .get_continuous_range(&(0, 0).into(), 3),
-            Ok(vec![
-                bigint!(3).into(),
-                bigint!(4).into(),
-                bigint!(5).into(),
-            ]),
+            Ok(vec![3.into(), 4.into(), 5.into(),]),
         )
     }
 
@@ -1735,7 +1708,7 @@ mod test {
             (*runner.pyvm.get_vm())
                 .borrow()
                 .get_continuous_range(&(0, 0).into(), 2),
-            Ok(vec![bigint!(3).into(), bigint!(4).into(),]),
+            Ok(vec![3.into(), 4.into(),]),
         );
     }
 
@@ -1896,7 +1869,7 @@ mod test {
                     .unwrap()
                     .get_int_ref()
                     .unwrap(),
-                &bigint!(1),
+                &Felt::new(1),
             );
             assert_eq!(
                 vm_ref
@@ -1905,7 +1878,7 @@ mod test {
                     .unwrap()
                     .get_int_ref()
                     .unwrap(),
-                &bigint!(2),
+                &Felt::new(2),
             );
 
             let relocatable = vm_ref
@@ -1913,8 +1886,7 @@ mod test {
                 .unwrap()
                 .unwrap()
                 .get_relocatable()
-                .unwrap()
-                .clone();
+                .unwrap();
 
             assert_eq!(
                 vm_ref
@@ -1923,7 +1895,7 @@ mod test {
                     .unwrap()
                     .get_int_ref()
                     .unwrap(),
-                &bigint!(3),
+                &Felt::new(3),
             );
             assert_eq!(
                 vm_ref
@@ -1932,7 +1904,7 @@ mod test {
                     .unwrap()
                     .get_int_ref()
                     .unwrap(),
-                &bigint!(4),
+                &Felt::new(4),
             );
             assert!(vm_ref.get_maybe(&(&relocatable + 2)).unwrap().is_none());
 
@@ -1941,8 +1913,7 @@ mod test {
                 .unwrap()
                 .unwrap()
                 .get_relocatable()
-                .unwrap()
-                .clone();
+                .unwrap();
 
             assert_eq!(
                 vm_ref
@@ -1951,7 +1922,7 @@ mod test {
                     .unwrap()
                     .get_int_ref()
                     .unwrap(),
-                &bigint!(5),
+                &Felt::new(5),
             );
             assert_eq!(
                 vm_ref
@@ -1960,7 +1931,7 @@ mod test {
                     .unwrap()
                     .get_int_ref()
                     .unwrap(),
-                &bigint!(6),
+                &Felt::new(6),
             );
             assert!(vm_ref.get_maybe(&(&relocatable + 2)).unwrap().is_none());
 
@@ -2074,7 +2045,7 @@ mod test {
                     .get(py, &ap)
                     .unwrap()
                     .map(|x| MaybeRelocatable::from(x.extract::<PyMaybeRelocatable>(py).unwrap())),
-                Some(MaybeRelocatable::Int(bigint!(144))),
+                Some(MaybeRelocatable::from(144)),
             );
         });
     }
@@ -2097,13 +2068,7 @@ mod test {
                 let ptr = vm.add_memory_segment();
                 vm.load_data(
                     &(&ptr).into(),
-                    vec![
-                        bigint!(1).into(),
-                        bigint!(2).into(),
-                        bigint!(3).into(),
-                        bigint!(4).into(),
-                        bigint!(5).into(),
-                    ],
+                    &vec![1.into(), 2.into(), 3.into(), 4.into(), 5.into()],
                 )
                 .unwrap();
 
@@ -2119,13 +2084,7 @@ mod test {
                     .into_iter()
                     .map(MaybeRelocatable::from)
                     .collect::<Vec<_>>(),
-                vec![
-                    bigint!(1).into(),
-                    bigint!(2).into(),
-                    bigint!(3).into(),
-                    bigint!(4).into(),
-                    bigint!(5).into(),
-                ],
+                vec![1.into(), 2.into(), 3.into(), 4.into(), 5.into(),],
             );
         });
     }
@@ -2161,11 +2120,8 @@ mod test {
 
             let mut vm = (*runner.pyvm.vm).borrow_mut();
             // Check that the segment exists by writing to it.
-            vm.insert_value(
-                &Relocatable::from((0, 0)),
-                MaybeRelocatable::Int(bigint!(42)),
-            )
-            .expect("memory insert failed");
+            vm.insert_value(&Relocatable::from((0, 0)), MaybeRelocatable::from(42))
+                .expect("memory insert failed");
         });
     }
 
